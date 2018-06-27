@@ -130,8 +130,8 @@ func NewProtocolManager(raftId uint16, raftPort uint16, blockchain *core.BlockCh
 }
 
 func (pm *ProtocolManager) Start(p2pServer *p2p.Server) {
-	log.Info("starting raft protocol handler")
-
+	log.Info("starting raft protocol handler, quorum hackathon")
+	log.Info("QH: STATIC LEADER-SELECTION, A leader will resign after minting ", " BlockBeforeResigning ", BlockBeforeResigning)
 	pm.p2pServer = p2pServer
 	pm.minedBlockSub = pm.eventMux.Subscribe(core.NewMinedBlockEvent{})
 	pm.startRaft()
@@ -477,10 +477,61 @@ func (pm *ProtocolManager) startRaft() {
 		pm.unsafeRawNode = etcdRaft.StartNode(raftConfig, raftPeers)
 	}
 
+	newBlockChan := make(chan string)
+
 	go pm.serveRaft()
 	go pm.serveLocalProposals()
-	go pm.eventLoop()
+	go pm.eventLoop(newBlockChan)
 	go pm.handleRoleChange(pm.rawNode().RoleChan().Out())
+	pm.printNodeRole()
+	go pm.newBlockLogger(newBlockChan)
+}
+
+func (pm *ProtocolManager) printNodeRole() {
+	log.Info("QH: Role of the node is " + pm.NodeInfo().Role)
+	log.Info("QH: peers of this node are  ")
+	for _, peeraddress := range pm.NodeInfo().PeerAddresses {
+		log.Info("QH: peer ", " ", peeraddress)
+	}
+
+}
+
+const (
+	BlockBeforeResigning = 3
+)
+
+//Nadeem: get a message on a channel which signal's creation of a new block
+//Nadeem: a lerdership term for a minter is assumed to be a number of blocks it can mint
+//Nadeem: when it reaches this value, relinquish the leader/minter role and transfer leadership
+func (pm *ProtocolManager) newBlockLogger(newBlockChan chan string) {
+
+	//	blockbeforeresigning := uint64(3) //number of blocks before resigning, TODO move to const
+	numberOfBlocksMinted := uint64(0)
+	numberOfBlocksVerified := uint64(0)
+	for channelvalue := range newBlockChan {
+		if channelvalue == "blockcreated" {
+			log.Info("QH:  a new block was minted")
+			if pm.NodeInfo().Role == "minter" {
+				numberOfBlocksMinted++
+				log.Info("QH: number of blocks minted ", " ", numberOfBlocksMinted)
+			} else {
+				numberOfBlocksVerified++
+				log.Info("QH: number of blocks verified  ", " ", numberOfBlocksVerified)
+			}
+		}
+
+		if pm.NodeInfo().Role == "minter" && numberOfBlocksMinted >= BlockBeforeResigning {
+			log.Info("QH: completed term, will RESIGN ")
+			newLeader := pm.NodeInfo().PeerAddresses[0].raftId
+			currentLeader := pm.NodeInfo().Address.raftId
+			log.Info("QH: current leader is  ", " raftId ", currentLeader)
+			log.Info("QH: chosen the first peer which has a value ", " ", newLeader) //TODO: randomize, should we randomize ? since raft is doing election anyways
+			timeout, _ := time.ParseDuration("500ms")
+			c, _ := context.WithTimeout(context.TODO(), timeout) //ignore the cancel channel for now
+			pm.rawNode().TransferLeadership(c, uint64(currentLeader), uint64(newLeader))
+			numberOfBlocksMinted = 0
+		}
+	}
 }
 
 func (pm *ProtocolManager) setLocalAddress(addr *Address) {
@@ -663,7 +714,7 @@ func (pm *ProtocolManager) removePeer(raftId uint16) {
 	pm.removedPeers.Add(raftId)
 }
 
-func (pm *ProtocolManager) eventLoop() {
+func (pm *ProtocolManager) eventLoop(newBlockChan chan string) {
 	ticker := time.NewTicker(tickerMS * time.Millisecond)
 	defer ticker.Stop()
 	defer pm.wal.Close()
@@ -721,6 +772,8 @@ func (pm *ProtocolManager) eventLoop() {
 						log.Warn("not applying already-applied block", "block hash", block.Hash(), "parent", block.ParentHash(), "head", headBlockHash)
 					} else {
 						pm.applyNewChainHead(&block)
+						log.Info("QH: Done applying changes to BC, role of this node is ", pm.NodeInfo().Role)
+						newBlockChan <- "blockcreated"
 					}
 
 				case raftpb.EntryConfChange:
@@ -881,3 +934,4 @@ func (pm *ProtocolManager) advanceAppliedIndex(index uint64) {
 	pm.appliedIndex = index
 	pm.mu.Unlock()
 }
+
