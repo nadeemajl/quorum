@@ -9,6 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"crypto"
+	"crypto/rsa"
+	"crypto/sha256"
+
 	"golang.org/x/net/context"
 
 	"github.com/coreos/etcd/pkg/fileutil"
@@ -490,8 +494,9 @@ func (pm *ProtocolManager) startRaft() {
 func (pm *ProtocolManager) printNodeRole() {
 	log.Info("QH: Role of the node is " + pm.NodeInfo().Role)
 	log.Info("QH: peers of this node are  ")
+
 	for _, peeraddress := range pm.NodeInfo().PeerAddresses {
-		log.Info("QH: peer ", " ", peeraddress)
+		log.Info("QH: peer ", " ", peeraddress.nodeId)
 	}
 
 }
@@ -523,6 +528,7 @@ func (pm *ProtocolManager) newBlockLogger(newBlockChan chan string) {
 		if pm.NodeInfo().Role == "minter" && numberOfBlocksMinted >= BlockBeforeResigning {
 			log.Info("QH: completed term, will RESIGN ")
 			newLeader := pm.NodeInfo().PeerAddresses[0].raftId
+
 			currentLeader := pm.NodeInfo().Address.raftId
 			log.Info("QH: current leader is  ", " raftId ", currentLeader)
 			log.Info("QH: chosen the first peer which has a value ", " ", newLeader) //TODO: randomize, should we randomize ? since raft is doing election anyways
@@ -581,6 +587,8 @@ func (pm *ProtocolManager) handleRoleChange(roleC <-chan interface{}) {
 
 			if intRole == minterRole {
 				log.EmitCheckpoint(log.BecameMinter)
+				pm.minter.nodeId = pm.NodeInfo().Address.nodeId.String()
+				log.Info("QH: Assinged the minter with node id ", " ", pm.minter.nodeId)
 				pm.minter.start()
 			} else { // verifier
 				log.EmitCheckpoint(log.BecameVerifier)
@@ -771,6 +779,23 @@ func (pm *ProtocolManager) eventLoop(newBlockChan chan string) {
 						headBlockHash := pm.blockchain.CurrentBlock().Hash()
 						log.Warn("not applying already-applied block", "block hash", block.Hash(), "parent", block.ParentHash(), "head", headBlockHash)
 					} else {
+						//Nadeem: verify the signature by reading the hash from the headerExtra block
+						log.Info("QH: Address of this node is  ", " ", pm.address.nodeId.String())
+
+						//get the address of the miner from the block
+						minerAddress := string(block.Header().Extra[:128])
+						log.Info("QH: Miner address is ", " ", minerAddress)
+						hash := sha256.Sum256([]byte(minerAddress))
+						minerPublicKey := GetPublicKeyForNode(minerAddress)
+
+						signature := block.Header().Extra[128:]
+						err := rsa.VerifyPKCS1v15(minerPublicKey, crypto.SHA256, hash[:], signature)
+						if err != nil {
+							log.Info("QH: signature validation failed, got an error", " ", err)
+						} else {
+							log.Info("QH: Successfully validated the block signature")
+						}
+
 						pm.applyNewChainHead(&block)
 						log.Info("QH: Done applying changes to BC, role of this node is ", pm.NodeInfo().Role)
 						newBlockChan <- "blockcreated"
@@ -934,4 +959,3 @@ func (pm *ProtocolManager) advanceAppliedIndex(index uint64) {
 	pm.appliedIndex = index
 	pm.mu.Unlock()
 }
-

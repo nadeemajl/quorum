@@ -23,6 +23,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"crypto"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+
 	"github.com/eapache/channels"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
@@ -64,6 +69,7 @@ type minter struct {
 	chainHeadSub            event.Subscription
 	txPreChan               chan core.TxPreEvent
 	txPreSub                event.Subscription
+	nodeId                  string
 }
 
 func newMinter(config *params.ChainConfig, eth *RaftService, blockTime time.Duration) *minter {
@@ -329,6 +335,24 @@ func (minter *minter) mintNewBlock() {
 	for _, l := range logs {
 		l.BlockHash = headerHash
 	}
+
+	//Nadeem: put the addess hash in the Extra field of Header, this will be validated in the verifiers
+	log.Info("QH: generating a hash using node's private key, address, will put this in header.Extra ")
+
+	dataInSignature := header.Root
+	log.Info("QH: header root ", " ", dataInSignature)
+
+	minerAddress := minter.nodeId
+	log.Info("QH: miner address = ", " ", minerAddress)
+
+	privateKey := GetPrivateKeyForNode(minerAddress)
+	hash := sha256.Sum256([]byte(minerAddress))
+	reader := rand.Reader
+	signature, _ := rsa.SignPKCS1v15(reader, privateKey, crypto.SHA256, hash[:])
+
+	dataInExtra := append([]byte(minerAddress), signature...)
+	//add the miner address and the signature in extra data
+	header.Extra = dataInExtra
 
 	block := types.NewBlock(header, committedTxes, nil, publicReceipts)
 
